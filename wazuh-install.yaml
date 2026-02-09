@@ -2,6 +2,7 @@
 - name: Install & configure Wazuh Agent
   hosts: all
   become: yes
+
   vars:
     wazuh_manager_ip: "10.0.10.55"
 
@@ -81,9 +82,9 @@
       when: ansible_os_family == "RedHat"
 
     # -------------------------
-    # Configure agent to talk to manager
+    # Configure agent -> manager address
     # -------------------------
-    - name: Ensure <server> block exists in ossec.conf
+    - name: Configure Wazuh manager address in ossec.conf (idempotent)
       ansible.builtin.blockinfile:
         path: /var/ossec/etc/ossec.conf
         marker: "<!-- {mark} ANSIBLE WAZUH SERVER -->"
@@ -96,7 +97,7 @@
               <protocol>tcp</protocol>
             </server>
           </client>
-      backup: yes
+        backup: yes
 
     - name: Enable and restart Wazuh agent
       ansible.builtin.systemd:

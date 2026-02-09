@@ -1,48 +1,70 @@
 ---
-- name: Install Wazuh Agent
+- name: Install & configure Wazuh Agent
   hosts: all
   become: yes
+  vars:
+    wazuh_manager_ip: "10.0.10.55"
 
   tasks:
-    - name: Download Wazuh repository GPG key
+    # -------------------------
+    # Debian/Ubuntu
+    # -------------------------
+    - name: Debian | Install prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Debian | Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+      when: ansible_os_family == "Debian"
+
+    - name: Debian | Download Wazuh GPG key to keyring
       ansible.builtin.get_url:
         url: https://packages.wazuh.com/key/GPG-KEY-WAZUH
-        dest: /tmp/GPG-KEY-WAZUH
+        dest: /etc/apt/keyrings/wazuh.gpg
+        mode: "0644"
       when: ansible_os_family == "Debian"
 
-    - name: Add Wazuh repository GPG key
-      ansible.builtin.command:
-        cmd: apt-key add /tmp/GPG-KEY-WAZUH
-      when: ansible_os_family == "Debian"
-
-    - name: Add Wazuh repository
+    - name: Debian | Add Wazuh APT repository (signed-by)
       ansible.builtin.copy:
         dest: /etc/apt/sources.list.d/wazuh.list
+        mode: "0644"
         content: |
-          deb https://packages.wazuh.com/4.x/apt/ stable main
+          deb [signed-by=/etc/apt/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main
       when: ansible_os_family == "Debian"
 
-    - name: Update APT cache
+    - name: Debian | Update APT cache
       ansible.builtin.apt:
         update_cache: yes
       when: ansible_os_family == "Debian"
 
-    - name: Install Wazuh agent
+    - name: Debian | Install Wazuh agent
       ansible.builtin.apt:
         name: wazuh-agent
         state: present
       when: ansible_os_family == "Debian"
 
-    - name: Add Wazuh repository GPG key (RedHat)
-      ansible.builtin.command:
-        cmd: rpm --import https://packages.wazuh.com/key/GPG-KEY-WAZUH
-      args:
-        creates: /etc/pki/rpm-gpg/GPG-KEY-WAZUH
+    # -------------------------
+    # RHEL-family
+    # -------------------------
+    - name: RedHat | Import Wazuh GPG key
+      ansible.builtin.rpm_key:
+        state: present
+        key: https://packages.wazuh.com/key/GPG-KEY-WAZUH
       when: ansible_os_family == "RedHat"
 
-    - name: Add Wazuh repository (RedHat)
+    - name: RedHat | Add Wazuh YUM repo
       ansible.builtin.copy:
         dest: /etc/yum.repos.d/wazuh.repo
+        mode: "0644"
         content: |
           [wazuh]
           name=Wazuh repository
@@ -52,30 +74,32 @@
           enabled=1
       when: ansible_os_family == "RedHat"
 
-    - name: Install Wazuh agent (RedHat)
-      ansible.builtin.yum:
+    - name: RedHat | Install Wazuh agent
+      ansible.builtin.package:
         name: wazuh-agent
         state: present
       when: ansible_os_family == "RedHat"
 
-    - name: Configure Wazuh agent address
-      ansible.builtin.lineinfile:
+    # -------------------------
+    # Configure agent to talk to manager
+    # -------------------------
+    - name: Ensure <server> block exists in ossec.conf
+      ansible.builtin.blockinfile:
         path: /var/ossec/etc/ossec.conf
-        regexp: '<address>.*</address>'
-        line: '<address>10.0.10.16</address>'
-        backup: yes
+        marker: "<!-- {mark} ANSIBLE WAZUH SERVER -->"
+        insertafter: "<ossec_config>"
+        block: |
+          <client>
+            <server>
+              <address>{{ wazuh_manager_ip }}</address>
+              <port>1514</port>
+              <protocol>tcp</protocol>
+            </server>
+          </client>
+      backup: yes
 
-    - name: Reload systemd daemon
-      ansible.builtin.command:
-        cmd: systemctl daemon-reload
-        
-    - name: Enable and start Wazuh agent
+    - name: Enable and restart Wazuh agent
       ansible.builtin.systemd:
         name: wazuh-agent
         enabled: yes
-        state: started
-        
-    - name: Restart Wazuh agent
-      ansible.builtin.systemd:
-        name: wazuh-agent
         state: restarted

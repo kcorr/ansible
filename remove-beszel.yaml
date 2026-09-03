@@ -1,0 +1,56 @@
+---
+- name: Remove beszel-agent
+  hosts: all
+  become: yes
+  tasks:
+    - name: Stop beszel-agent service
+      systemd:
+        name: beszel-agent
+        state: stopped
+      failed_when: false
+
+    - name: Disable beszel-agent service
+      systemd:
+        name: beszel-agent
+        enabled: no
+      failed_when: false
+
+    - name: Remove beszel-agent systemd unit file
+      file:
+        path: /etc/systemd/system/beszel-agent.service
+        state: absent
+      register: unit_removed
+
+    - name: Reload systemd daemon if unit file was removed
+      systemd:
+        daemon_reload: yes
+      when: unit_removed.changed
+
+    - name: Remove beszel-agent install directory
+      file:
+        path: /opt/beszel-agent
+        state: absent
+
+    - name: Remove beszel-agent binary if installed separately
+      file:
+        path: /usr/local/bin/beszel-agent
+        state: absent
+
+    - name: Remove beszel system user, if present
+      user:
+        name: beszel
+        state: absent
+        remove: yes
+      failed_when: false
+
+    - name: Confirm beszel-agent is gone
+      command: systemctl status beszel-agent
+      register: status_check
+      changed_when: false
+      failed_when: false
+
+    - name: Report removal result
+      debug:
+        msg: >-
+          {{ inventory_hostname }}: beszel-agent
+          {{ 'still present' if 'could not be found' not in status_check.stderr else 'removed cleanly' }}

@@ -31,6 +31,7 @@
         any_host_has_failures: "{{ groups['all'] | map('extract', hostvars, 'has_failed_units') | select | list | length > 0 }}"
       run_once: true
       delegate_to: localhost
+      become: false
 
     - name: Send one email listing all hosts with failed units
       mail:
@@ -49,4 +50,5 @@
           {% endfor %}
       run_once: true
       delegate_to: localhost
+      become: false
       when: any_host_has_failures

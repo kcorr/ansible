@@ -1,36 +1,94 @@
+---
+# Nightly server update playbook
+# - Full package upgrade, but WITHOUT dist-upgrade's dependency-driven
+#   add/remove behavior (upgrade: yes, not upgrade: dist)
+# - Tolerates a broken/half-configured package on one host instead of
+#   failing the whole run
+# - Cleans up old packages and flags hosts that need a reboot
+
 - hosts: all
   become: true
+
   tasks:
-    # 1. Accept repository changes explicitly
-    - name: Accept repository changes explicitly
-      shell: apt-get update --allow-releaseinfo-change
-      ignore_errors: yes
+    # 1. Repair anything left half-configured from a previous failed
+    #    run (a broken postinst script, an interrupted upgrade, etc.)
+    #    before apt tries to do anything else.
+    - name: Attempt to fix any half-configured packages
+      command: dpkg --configure -a
+      register: dpkg_repair
+      changed_when: "'Setting up' in dpkg_repair.stdout"
+      failed_when: false
 
-    # 2. Check for GPG key error
-    - name: Check for GPG key error during apt update
-      shell: apt-get update
-      register: apt_update_result
-      ignore_errors: yes
-
-    # 3. Update MongoDB GPG key if error detected
-    - name: Update MongoDB GPG key if error is detected
-      shell: |
-        wget -qO - https://www.mongodb.org/static/pgp/server-3.2.asc | apt-key add -
-      when: "'EXPKEYSIG D68FA50FEA312927' in apt_update_result.stderr"
-      ignore_errors: yes
-
-    # 4. Update apt cache
+    # 2. Refresh package lists.
     - name: Update apt cache
       apt:
         update_cache: yes
         lock_timeout: 120
+      register: apt_update_result
+      failed_when: false
 
-    # 5. Upgrade all packages except wazuh-agent
-    - name: Upgrade all packages except wazuh-agent
+    - name: Report hosts where apt cache update failed
+      debug:
+        msg: >-
+          apt update FAILED on {{ inventory_hostname }}:
+          {{ apt_update_result.msg | default('unknown error') }}
+      when: apt_update_result is failed
+
+    # 3. Upgrade all installed packages to their latest versions.
+    #    Using `upgrade: yes` (not `dist`) means apt will NOT add or
+    #    remove packages to resolve a dependency change — it just
+    #    skips a package if that's required, rather than restructuring
+    #    things unattended. Don't let one host's broken package kill
+    #    the whole play.
+    - name: Upgrade all packages (safe upgrade, no add/remove)
       apt:
-        upgrade: dist
+        upgrade: yes
         state: latest
         lock_timeout: 120
-        force: yes
-      vars:
-        ansible_apt_excludes: "wazuh-agent"
+        dpkg_options: 'force-confdef,force-confold'
+      register: upgrade_result
+      failed_when: false
+      when: apt_update_result is not failed
+
+    - name: Report hosts where upgrade failed
+      debug:
+        msg: >-
+          Upgrade FAILED on {{ inventory_hostname }}:
+          {{ upgrade_result.msg | default('unknown error') }}
+      when: upgrade_result is defined and upgrade_result is failed
+
+    # 4. Remove now-unused packages and old cached debs so /var
+    #    doesn't slowly fill up over time.
+    - name: Remove unused dependencies
+      apt:
+        autoremove: yes
+      when: upgrade_result is defined and upgrade_result is not failed
+
+    - name: Clean up old downloaded package files
+      apt:
+        autoclean: yes
+      when: upgrade_result is defined and upgrade_result is not failed
+
+    # 5. Flag hosts that need a reboot (e.g. after kernel/libc
+    #    updates) instead of silently running stale until someone
+    #    happens to notice.
+    - name: Check if a reboot is required
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+
+    - name: Report hosts that need a reboot
+      debug:
+        msg: "{{ inventory_hostname }} requires a reboot."
+      when: reboot_required_file.stat.exists
+
+    # 6. Final per-host summary so a Semaphore/AWX log is easy to scan
+    #    at a glance without reading full task output.
+    - name: Summarize this host's run
+      debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          dpkg_repair={{ 'ran' if (dpkg_repair.changed | default(false)) else 'clean' }},
+          apt_update={{ 'FAILED' if (apt_update_result is failed) else 'ok' }},
+          upgrade={{ 'FAILED' if (upgrade_result is defined and upgrade_result is failed) else 'ok' }},
+          reboot_required={{ reboot_required_file.stat.exists }}

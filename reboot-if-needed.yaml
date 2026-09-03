@@ -8,14 +8,14 @@
     mail_server: mail.corr.cloud
   tasks:
     - name: Check for pending kernel update
-      shell: >
-        if [ -f /var/run/reboot-required ]; then
-          echo "true";
-        else
-          echo "false";
-        fi
-      register: kernel_update_required
-      changed_when: false
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+
+    - name: Set kernel_update_required for downstream tasks
+      set_fact:
+        kernel_update_required:
+          stdout: "{{ 'true' if reboot_required_file.stat.exists else 'false' }}"
 
     - name: Debug kernel update requirement
       debug:
@@ -32,12 +32,19 @@
       register: reboot_status
       changed_when: kernel_update_required.stdout == "true"
 
-    - name: Collect list of rebooted hosts
+    - name: Build combined list of rebooted hosts across the whole play
       set_fact:
-        rebooted_hosts: "{{ rebooted_hosts | default([]) + [inventory_hostname] }}"
-      when: kernel_update_required.stdout == "true"
+        all_rebooted_hosts: >-
+          {{ groups['all']
+             | map('extract', hostvars)
+             | selectattr('kernel_update_required', 'defined')
+             | selectattr('kernel_update_required.stdout', 'equalto', 'true')
+             | map(attribute='inventory_hostname')
+             | list }}
+      run_once: true
+      delegate_to: localhost
 
-    - name: Send email notification if any servers were rebooted
+    - name: Send one email notification listing all rebooted servers
       mail:
         host: "{{ mail_server }}"
         port: 25
@@ -46,5 +53,7 @@
         subject: "Reboot Notification: Servers Rebooted"
         body: >
           The following servers were rebooted due to a pending kernel update:
-          {{ rebooted_hosts | join(', ') }}
-      when: rebooted_hosts is defined
+          {{ all_rebooted_hosts | join(', ') }}
+      run_once: true
+      delegate_to: localhost
+      when: all_rebooted_hosts | length > 0
